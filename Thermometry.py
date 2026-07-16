@@ -154,7 +154,7 @@ def save_spectrum(detunings, values, errs=None, n_valid=None, directory=".", pre
     print(f"Saved: {out_csv}")
     return out_csv
 
-def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.1, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True):
+def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.2, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True):
     """
     (Re)initialize hardware/sequence for a run so probe amplitude is a clean parameter.
 
@@ -581,7 +581,7 @@ class LiveScanApp(QtWidgets.QMainWindow):
             output_dir=str(self.output_dir.text()).strip() or os.getcwd(),
             save_csv=bool(self.save_csv.isChecked()),
             # advanced defaults:
-            ram_step=0.1,
+            ram_step=0.2,
             trap_depth=float(self.trap_depth.value()),  # CHANGED (was hardcoded 0.55)
         )
 

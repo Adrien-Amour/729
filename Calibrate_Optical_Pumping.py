@@ -90,12 +90,11 @@ def prepare_op_cal_context(*, params: dict, dds_dict=None, pulse_sequencer=None)
             "854 SP2": 0,
             "397b": -18,  # CHANGED: move OP detuning from 397c -> 397b
             "397c": 0,    # CHANGED: keep 397c at 0 (not used for OP now)
-            "866": 0,
             "866 OP": op_det_init,  # initial value; may be scanned via edit_detunings
             "850 RP": 0,
             "866 RP": 40,
-            "729 Temp1": float(params["res_m_plus_mhz"]),  # initial; will be swapped per scenario
-            "729 Temp2": 0,
+            "729 t1": float(params["res_m_plus_mhz"]),  # initial; will be swapped per scenario
+            "729 t2": 0,
         }
     )
 
@@ -145,7 +144,7 @@ def prepare_op_cal_context(*, params: dict, dds_dict=None, pulse_sequencer=None)
     exp_sequence.create_section(
         name="Probe",
         duration=int(probe_section_dur),
-        dds_functions={"729 Temp1": make_probe_fn(amp=float(params["probe_power"]), ton_us=probe_len_us)},
+        dds_functions={"729 t1": make_probe_fn(amp=float(params["probe_power"]), ton_us=probe_len_us)},
         pmt_gate_high=True,
     )
 
@@ -159,7 +158,7 @@ def prepare_op_cal_context(*, params: dict, dds_dict=None, pulse_sequencer=None)
         timeout=100,
         pmt_threshold=2000,
         expected_fluorescence=8000,
-        pulse_expected_fluorescence=5000,
+        pulse_expected_fluorescence=3200,
         sp_threshold=None,
         load_timeout=100,
         trigger_mode="ram",
@@ -180,7 +179,7 @@ def run_point(
 ):
     # Change only what is needed using set_detuning
     set_detuning(exp_sequence, "866 OP", float(op_detuning_mhz))
-    set_detuning(exp_sequence, "729 Temp1", float(probe_detuning_mhz))
+    set_detuning(exp_sequence, "729 t1", float(probe_detuning_mhz))
 
     exp_sequence.build_ram_arrays()
     exp_sequence.flash()
@@ -296,8 +295,8 @@ class OpticalPumpingWorker(QtCore.QObject):
                         return
                     _run_two_scenarios(exp_sequence=exp_sequence, exp_runner=exp_runner, x_value=float(x), op_det_mhz=float(x))
 
-            elif scan_param in ("pump_stretch_len", "pump_stretch_power"):
-                # Minimal/robust: rebuild per point because section duration / DDS functions change.
+            elif scan_param == "pump_stretch_len":
+                # Rebuild every point because the sequence duration changes.
                 fixed_op_det = float(p["fixed_op_detuning_mhz"])
 
                 for x in xs:
@@ -308,16 +307,54 @@ class OpticalPumpingWorker(QtCore.QObject):
 
                     plocal = dict(p)
                     plocal["op_detuning_mhz"] = fixed_op_det
-                    if scan_param == "pump_stretch_len":
-                        plocal["pump_to_stretch_len_us"] = float(x)
-                    else:  # "pump_stretch_power"
-                        # interpret "pump to stretch power" as the 866 OP amplitude used in Pump To Stretch
-                        plocal["amp_866op"] = float(x)
+                    plocal["pump_to_stretch_len_us"] = float(x)
+
+                    # Must initialise a new DDS dict because the sequence duration changes.
+                    dds_dict = load_dds_dict(
+                        "ram",
+                        r"C:\Users\probe\OneDrive - University of Sussex\Desktop\Experiment_Config\dds_config.cfg",
+                    )
 
                     exp_sequence, exp_runner = prepare_op_cal_context(
-                        params=plocal, dds_dict=dds_dict, pulse_sequencer=pulse_sequencer
+                        params=plocal,
+                        dds_dict=dds_dict,
+                        pulse_sequencer=pulse_sequencer,
                     )
-                    _run_two_scenarios(exp_sequence=exp_sequence, exp_runner=exp_runner, x_value=float(x), op_det_mhz=fixed_op_det)
+
+                    _run_two_scenarios(
+                        exp_sequence=exp_sequence,
+                        exp_runner=exp_runner,
+                        x_value=float(x),
+                        op_det_mhz=fixed_op_det,
+                    )
+
+            elif scan_param == "pump_stretch_power":
+                # Rebuild every point because DDS functions change.
+                fixed_op_det = float(p["fixed_op_detuning_mhz"])
+
+                for x in xs:
+                    if self._should_stop():
+                        self.status.emit("Stopped.")
+                        self.finished.emit()
+                        return
+
+                    plocal = dict(p)
+                    plocal["op_detuning_mhz"] = fixed_op_det
+                    # Interpret "pump stretch power" as the 866 OP amplitude.
+                    plocal["amp_866op"] = float(x)
+
+                    exp_sequence, exp_runner = prepare_op_cal_context(
+                        params=plocal,
+                        dds_dict=dds_dict,
+                        pulse_sequencer=pulse_sequencer,
+                    )
+
+                    _run_two_scenarios(
+                        exp_sequence=exp_sequence,
+                        exp_runner=exp_runner,
+                        x_value=float(x),
+                        op_det_mhz=fixed_op_det,
+                    )
 
             else:
                 raise ValueError(f"Unknown scan_param: {scan_param}")

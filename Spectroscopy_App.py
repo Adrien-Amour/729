@@ -2,6 +2,7 @@ import os  # moved up so env var is set before importing pyqtgraph
 # Force pyqtgraph to use PyQt5 (prevents PySide/PyQt mismatches)
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 
+import math
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtGui, QtWidgets
@@ -17,6 +18,9 @@ import webbrowser
 import itertools
 import re
 from scipy.optimize import curve_fit  # added
+
+# Keep UI/sequence time resolution consistent
+DEFAULT_RAM_STEP = 0.1
 
 def zeemanFS(J, S, L, B):
     muB = 9.274078e-24   # Bohr magneton in J/T
@@ -37,6 +41,64 @@ sensitivity = 2*Delta_m2/(2*np.pi)  # MHz/Gauss
 
 def gaussian(amplitude, mu, sigma): #Sigma is Half Width 1/e height (multiply by 2*sqrt(ln(2)) to get FWHM ~1.665)
     return lambda t: amplitude * np.exp(-((t - mu)**2) / (sigma**2))
+
+def adiabatic(amplitude: float, ton_us: float, edge_us: float = 1.0):
+    """
+    Raised-cosine envelope:
+    - ramp up over first edge_us
+    - flat top
+    - ramp down over last edge_us
+    If ton_us < 2*edge_us, ramps overlap symmetrically (no flat top).
+    """
+    A = float(amplitude)
+    T = float(max(0.0, ton_us))
+    e = float(max(0.0, edge_us))
+
+    if T <= 0.0:
+        return lambda t: 0.0
+    if e <= 0.0:
+        return lambda t: A if 0.0 <= float(t) <= T else 0.0
+
+    # If pulse is short, use symmetric half-duration ramps
+    if T < 2.0 * e:
+        e = T / 2.0
+
+    def fn(t):
+        x = float(t)
+        if x < 0.0 or x > T:
+            return 0.0
+
+        # Ramp up: 0 -> A
+        if x < e:
+            return A * 0.5 * (1.0 - np.cos(np.pi * x / e))
+
+        # Ramp down: A -> 0
+        if x > (T - e):
+            y = T - x
+            return A * 0.5 * (1.0 - np.cos(np.pi * y / e))
+
+        # Flat top
+        return A
+
+    return fn
+def make_probe_fn(*, amp: float, ton_us: float, shape: str = "square"):
+    ton_us = float(max(0.0, ton_us))
+    amp = float(amp)
+
+    if shape == "square":
+        return lambda t: amp if float(t) < ton_us else 0.0
+
+    if shape == "gaussian":
+        if ton_us <= 0.0:
+            return lambda t: 0.0
+        sigma = ton_us / (2.0 * math.sqrt(math.log(100.0)))
+        center = ton_us / 2.0
+        return lambda t: amp * np.exp(-((float(t) - center) ** 2) / (sigma ** 2))
+
+    if shape == "adiabatic":
+        return adiabatic(amp, ton_us, edge_us=4.0)
+
+    raise ValueError(f"Unknown pulse shape: {shape!r}")
 
 # sinc^2 model + fitter
 def sinc2(x, A, x0, w, y0):
@@ -62,6 +124,35 @@ def fit_sinc2(x, y, x0_guess=None, y0_guess=None):
         )
     except Exception:
         popt, pcov = [max(0.0, A0), float(x0_guess), max(1e-12, w0), y00], np.full((4, 4), np.nan)
+    return popt, pcov
+
+def gauss(x, A, x0, sigma, y0):
+    x = np.asarray(x, dtype=float)
+    return y0 + A * np.exp(-0.5 * ((x - x0) / sigma) ** 2)
+
+def fit_gauss(x, y, x0_guess=None, y0_guess=None):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if x0_guess is None:
+        x0_guess = x[np.argmax(y)]
+
+    A0 = (np.max(y) - np.min(y)) or 1e-3
+    sigma0 = max((x.max() - x.min()) / 6.0, 1e-6)
+    y00 = float(np.min(y)) if y0_guess is None else float(y0_guess)
+
+    try:
+        popt, pcov = curve_fit(
+            gauss,
+            x,
+            y,
+            p0=[A0, float(x0_guess), sigma0, y00],
+            bounds=([0.0, -np.inf, 1e-12, -np.inf], [np.inf, np.inf, np.inf, np.inf]),
+            maxfev=20000,
+        )
+    except Exception:
+        popt, pcov = [max(0.0, A0), float(x0_guess), max(1e-12, sigma0), y00], np.full((4, 4), np.nan)
+
     return popt, pcov
 
 def next_spectrum_filename(directory=".", pad=3):
@@ -100,7 +191,7 @@ def save_spectrum(detunings, values, errs=None, n_valid=None, directory="."):
     print(f"Saved: {out_csv}")
     return out_csv
 
-def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.08, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True):
+def init_experiment(probe_amplitude, probe_time_us: float, *, ram_step=DEFAULT_RAM_STEP, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True, pulse_shape: str = "square"):
     """
     (Re)initialize hardware/sequence for a run so probe amplitude is a clean parameter.
 
@@ -116,8 +207,8 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.08, N_Cyc
     exp_sequence = Experiment_Builder(dds_dict, pulse_sequencer, ram_step=ram_step, N_Cycles=N_Cycles)
 
     exp_sequence.set_detunings(detuning_dict={
-        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -20, "866": 0, "866 OP": 30,
-        "850 RP": 0, "866 RP": 40, "729 Temp1": 0, "729 Temp2": 0
+        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -20, "866 OP": 30,
+        "850 RP": 0, "866 RP": 40, "729 t1": 0, "729 t2": 0
     })
 
     exp_sequence.load_cooling(length=2000)
@@ -144,9 +235,14 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.08, N_Cyc
     exp_sequence.create_section(name="wait before probe", duration=2, dds_functions={}, pmt_gate_high=False)
 
     # NOTE: freeze amplitude for this run (simple + predictable)
-    exp_sequence.create_section(name="Probe", duration=int(probe_time_us), dds_functions={
-        "729 Temp1": (lambda t, amp=float(probe_amplitude): amp),
-    }, pmt_gate_high=True)
+    exp_sequence.create_section(
+        name="Probe",
+        duration=int(max(1, math.ceil(float(probe_time_us)))),
+        dds_functions={
+            "729 t1": make_probe_fn(amp=float(probe_amplitude), ton_us=float(probe_time_us), shape=pulse_shape),
+        },
+        pmt_gate_high=True,
+    )
 
     exp_sequence.load_measurement()
     exp_sequence.build_ram_arrays()
@@ -158,7 +254,7 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.08, N_Cyc
         timeout=100,
         pmt_threshold=2000,
         expected_fluorescence=8000,
-        pulse_expected_fluorescence=4200,
+        pulse_expected_fluorescence=3300,
         sp_threshold=None,
         load_timeout=100,
         trigger_mode="ram",
@@ -170,7 +266,7 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.08, N_Cyc
 
 def dark_probability(exp_sequence, exp_runner, detuning, *, trap_depth=0.55, n_runs=3, cancel_cb=None, use_spam_correction=True):
     # CHANGED: run in cancelable chunks (N=1) so Stop becomes responsive.
-    exp_sequence.edit_detunings(detuning_dict={"729 Temp1": detuning})
+    exp_sequence.edit_detunings(detuning_dict={"729 t1": detuning})
     exp_sequence.build_ram_arrays()
     exp_sequence.flash()
 
@@ -239,6 +335,7 @@ class ScanWorker(QtCore.QObject):
                 ram_step=p["ram_step"],
                 N_Cycles=p["n_cycles"],
                 op_mode=p["op_mode"],
+                pulse_shape=p["pulse_shape"],
             )
 
             use_spam = self.params.get("use_spam_correction", True)
@@ -258,6 +355,7 @@ class ScanWorker(QtCore.QObject):
                     N_Cycles=p["n_cycles"],
                     op_mode=p["op_mode"],
                     measure_fluorescence=True,
+                    pulse_shape=p["pulse_shape"],
                 )
                 bg_runs = max(1, int(p["n_runs"]) * 2)
                 bg_detuning = float(p["center"])
@@ -305,7 +403,13 @@ class ScanWorker(QtCore.QObject):
                 if p["save_csv"]:
                     save_spectrum(dets, vals, errs=np.asarray(errs, float), n_valid=np.asarray(nvs, int), directory=p["output_dir"])
                 x0_guess = float(dets[np.nanargmax(vals)]) 
-                popt, _ = fit_sinc2(dets, vals, x0_guess=x0_guess, y0_guess=bg_y0)
+                pulse_shape = p.get("pulse_shape", "square")
+                if pulse_shape == "gaussian":
+                    popt, _ = fit_gauss(dets, vals, x0_guess=x0_guess, y0_guess=bg_y0)
+                elif pulse_shape == "adiabatic":
+                    popt, _ = fit_sinc2(dets, vals, x0_guess=x0_guess, y0_guess=bg_y0)
+                else:
+                    popt, _ = fit_sinc2(dets, vals, x0_guess=x0_guess, y0_guess=bg_y0)
                 self.scan_done.emit(which, dets, vals, popt)
                 return dets, vals, popt
 
@@ -360,8 +464,14 @@ class LiveScanApp(QtWidgets.QMainWindow):
         self.probe_amp.setSingleStep(0.01)
         self.probe_amp.setValue(1)
 
-        # NEW: probe time (µs)
-        self.probe_time_us = QtWidgets.QSpinBox(); self.probe_time_us.setRange(1, 10_000_000); self.probe_time_us.setValue(6)
+        # Probe time (µs) with resolution set by RAM step
+        self.probe_time_us = QtWidgets.QDoubleSpinBox()
+        self.probe_time_us.setRange(float(DEFAULT_RAM_STEP), 10_000_000.0)
+        self.probe_time_us.setSingleStep(float(DEFAULT_RAM_STEP))
+        # choose decimals so the RAM step is representable (e.g. 0.1 -> 1 dp, 0.08 -> 2 dp)
+        _ram_s = f"{float(DEFAULT_RAM_STEP):.12g}"
+        self.probe_time_us.setDecimals(len(_ram_s.split(".", 1)[1]) if "." in _ram_s else 0)
+        self.probe_time_us.setValue(6.0)
 
         self.n_runs = QtWidgets.QSpinBox(); self.n_runs.setRange(1, 999); self.n_runs.setValue(3)
         self.n_cycles = QtWidgets.QSpinBox(); self.n_cycles.setRange(1, 10_000_000); self.n_cycles.setValue(500)
@@ -396,28 +506,36 @@ class LiveScanApp(QtWidgets.QMainWindow):
         self.op_mode.setCurrentIndex(0)
         self.op_mode.setToolTip("Select optical pumping sequence")
 
+        self.pulse_shape = QtWidgets.QComboBox()
+        self.pulse_shape.addItem("Square pulse", "square")
+        self.pulse_shape.addItem("Gaussian pulse", "gaussian")
+        self.pulse_shape.addItem("Adiabatic Ramp", "adiabatic")
+        self.pulse_shape.setCurrentIndex(0)
+        self.pulse_shape.setToolTip("Select probe pulse shape")
+
         # NEW: background measurement toggle
         self.measure_background = QtWidgets.QCheckBox("Measure background (729 off)")
-        self.measure_background.setChecked(True)
+        self.measure_background.setChecked(False)
         self.measure_background.setToolTip("If enabled, measures P_dark once with 729 power=0 and uses it as y0 guess for the fit")
 
         form.addRow("Center [MHz]", self.center)
-        form.addRow("", self.load_res_btn)  # NEW
+        form.addRow("", self.load_res_btn)  #
         form.addRow("Span [MHz]", self.span)
         form.addRow("Resolution/step [MHz]", self.step)
-        form.addRow("Optical pumping", self.op_mode)  # NEW
+        form.addRow("Optical pumping", self.op_mode)  #
+        form.addRow("Probe pulse shape", self.pulse_shape)  
         form.addRow("Probe amplitude [0..1]", self.probe_amp)
-        form.addRow("Probe time [µs]", self.probe_time_us)   # NEW
+        form.addRow("Probe time [µs]", self.probe_time_us)   
         form.addRow("N runs (per detuning point)", self.n_runs)
         form.addRow("N cycles (builder)", self.n_cycles)
-        form.addRow("Trap depth", self.trap_depth)  # NEW
-        form.addRow("Output dir", self.output_dir)  # NEW (was missing from UI)
+        form.addRow("Trap depth", self.trap_depth)  
+        form.addRow("Output dir", self.output_dir)  
         form.addRow("", self.save_csv)
         form.addRow("", self.start_btn)
         form.addRow("", self.stop_btn)
         form.addRow("", self.write_res_btn)
         form.addRow("Status", self.status)
-        form.addRow("", self.measure_background)  # NEW
+        form.addRow("", self.measure_background)  
         form.addRow("", self.use_spam_correction)
 
 
@@ -466,17 +584,17 @@ class LiveScanApp(QtWidgets.QMainWindow):
             center=float(self.center.value()),               # CHANGED
             span=float(self.span.value()),
             step=float(self.step.value()),
-            op_mode=str(self.op_mode.currentData() or "m_minus"),  # NEW
+            op_mode=str(self.op_mode.currentData() or "m_minus"), 
+            pulse_shape=str(self.pulse_shape.currentData() or "square"),
             probe_amplitude=float(self.probe_amp.value()),
-            probe_time_us=int(self.probe_time_us.value()),   # NEW
+            probe_time_us=float(self.probe_time_us.value()),
             n_runs=int(self.n_runs.value()),
             n_cycles=int(self.n_cycles.value()),
             trap_depth=float(self.trap_depth.value()),       # NEW
             output_dir=str(self.output_dir.text()).strip() or os.getcwd(),
             save_csv=bool(self.save_csv.isChecked()),
             measure_background=bool(self.measure_background.isChecked()),  # NEW
-            # advanced defaults:
-            ram_step=0.1,
+            ram_step=float(DEFAULT_RAM_STEP),
             use_spam_correction=bool(self.use_spam_correction.isChecked()),
         )
 
@@ -554,7 +672,13 @@ class LiveScanApp(QtWidgets.QMainWindow):
     def on_scan_done(self, which, dets, vals, popt):
         self._popt[which] = popt
         xfit = np.linspace(float(np.min(dets)), float(np.max(dets)), 800)
-        yfit = sinc2(xfit, *popt)
+        pulse_shape = (self._current_params or {}).get("pulse_shape", "square")
+        if pulse_shape == "gaussian":
+            yfit = gauss(xfit, *popt)
+        elif pulse_shape == "adiabatic":
+            yfit = sinc2(xfit, *popt)
+        if pulse_shape == "square":
+            yfit = sinc2(xfit, *popt)
 
         self.fit.setData(xfit, yfit)
         self.vline.setPos(float(popt[1])); self.vline.show()

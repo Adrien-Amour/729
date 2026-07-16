@@ -38,6 +38,7 @@ for t_precess in t_precess_values:
     exp_sequence.load_trapping()
     exp_sequence.load_section("pump_to_stretch")
     exp_sequence.load_section("pump_to_ground")
+    exp_sequence.load_section("quench_metastables") # jut in case
 
     exp_sequence.create_section(
         name="RamseyBlock",

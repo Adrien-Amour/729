@@ -46,14 +46,14 @@ def _prepare_alignment_runner(
     exp_sequence = Experiment_Builder(
         dds_dict,
         pulse_sequencer,
-        ram_step=0.1,
+        ram_step=0.2,
         N_Cycles=int(n_cycles),
         external_trigger=bool(external_trigger),
     )
 
     exp_sequence.set_detunings(detuning_dict={
-        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -18, "866": 0, "866 OP": 0,
-        "850 RP": 0, "866 RP": -10, "729 Temp1": float(detuning_mhz), "729 Temp2": 0
+        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -18, "866S": 0, "866 OP": 0,
+        "850 RP": 0, "866 RP": -10, "729 t1": float(detuning_mhz), "729 t2": 0
     })
 
     exp_sequence.load_cooling(length=2000)
@@ -93,7 +93,7 @@ def _prepare_alignment_runner(
         exp_sequence.create_section(
             name="Probe",
             duration=int(section_dur),
-            dds_functions={"729 Temp1": dds_fn},
+            dds_functions={"729 t1": dds_fn},
             pmt_gate_high=True,
         )
 
@@ -107,7 +107,7 @@ def _prepare_alignment_runner(
         timeout=100,
         pmt_threshold=2000,
         expected_fluorescence=8000,
-        pulse_expected_fluorescence=5000,
+        pulse_expected_fluorescence=3300,
         sp_threshold=None,
         load_timeout=100,
         trigger_mode="ram",

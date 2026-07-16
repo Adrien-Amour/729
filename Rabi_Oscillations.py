@@ -129,14 +129,39 @@ def save_rabi_csv(path, meta: dict, t_us, p_dark, p_err, n_valid):
 
 # ...existing code...
 
-def make_probe_fn(*, amp: float, ton_us: float):
+def make_probe_fn(*, amp: float, ton_us: float, shape: str = "square"):
     ton_us = float(max(0.0, ton_us))
     amp = float(amp)
 
-    def _fn(t):
-        return amp if float(t) < ton_us else 0.0
+    if shape == "square":
+        return lambda t: amp if float(t) < ton_us else 0.0
 
-    return _fn
+    if shape == "gaussian":
+        if ton_us <= 0.0:
+            return lambda t: 0.0
+        sigma = ton_us / (2.0 * math.sqrt(math.log(100.0)))
+        center = ton_us / 2.0
+        return lambda t: amp * np.exp(-((float(t) - center) ** 2) / (sigma ** 2))
+
+    if shape == "adiabatic":
+        if ton_us <= 0.0:
+            return lambda t: 0.0
+        edge_us = min(4.0, ton_us / 2.0)
+
+        def _fn(t):
+            x = float(t)
+            if x < 0.0 or x > ton_us:
+                return 0.0
+            if x < edge_us:
+                return amp * 0.5 * (1.0 - np.cos(np.pi * x / edge_us))
+            if x > (ton_us - edge_us):
+                y = ton_us - x
+                return amp * 0.5 * (1.0 - np.cos(np.pi * y / edge_us))
+            return amp
+
+        return _fn
+
+    raise ValueError(f"Unknown pulse shape: {shape!r}")
 
 
 def prepare_rabi_context(*, params: dict):
@@ -159,8 +184,8 @@ def prepare_rabi_context(*, params: dict):
     )
 
     exp_sequence.set_detunings(detuning_dict={
-        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -18, "866": 0, "866 OP": 0,
-        "850 RP": 0, "866 RP": 40, "729 Temp1": float(params["detuning_mhz"]), "729 Temp2": 0
+        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -18, "866 OP": 0,
+        "850 RP": 0, "866 RP": 40, "729 t1": float(params["detuning_mhz"]), "729 t2": 0
     })
 
     exp_sequence.load_cooling(length=2000)
@@ -171,7 +196,7 @@ def prepare_rabi_context(*, params: dict):
     if op_mode == "m_minus":
         exp_sequence.load_section("pump_to_stretch")  
         exp_sequence.load_section("pump_to_ground")
-        exp_sequence.load_section("quench_metastables")  # Ensure we start in S1/2 m=-1/2c
+        exp_sequence.load_section("quench_metastables")  
 
     elif op_mode == "both":
         exp_sequence.load_section("quench_metastables")
@@ -179,6 +204,7 @@ def prepare_rabi_context(*, params: dict):
         raise ValueError(f"Unknown op_mode: {op_mode!r}")
 
     exp_sequence.create_section(name="wait before probe", duration=2, dds_functions={}, pmt_gate_high=False)
+    pulse_shape = str(params.get("pulse_shape", "square"))
 
     # FIXED-LENGTH probe section (duration = max scan time, but >=4 us)
     # Use ceil so decimal t_end_us is fully covered.
@@ -189,8 +215,8 @@ def prepare_rabi_context(*, params: dict):
             name="Probe",
             duration=probe_section_dur,
             dds_functions={
-                "397b": make_probe_fn(amp=1, ton_us=0.0),
-                "850 RP": make_probe_fn(amp=1, ton_us=0.0),
+                "397b": make_probe_fn(amp=1, ton_us=0.0, shape=pulse_shape),
+                "850 RP": make_probe_fn(amp=1, ton_us=0.0, shape=pulse_shape),
             },
             pmt_gate_high=True,
         )
@@ -198,7 +224,7 @@ def prepare_rabi_context(*, params: dict):
         exp_sequence.create_section(
             name="Probe",
             duration=probe_section_dur,
-            dds_functions={"729 Temp1": make_probe_fn(amp=float(params["probe_amplitude"]), ton_us=0.0)},
+            dds_functions={"729 t1": make_probe_fn(amp=float(params["probe_amplitude"]), ton_us=0.0, shape=pulse_shape)},
             pmt_gate_high=True,
         )
 
@@ -212,7 +238,7 @@ def prepare_rabi_context(*, params: dict):
         timeout=100,
         pmt_threshold=2000,
         expected_fluorescence=8000,
-        pulse_expected_fluorescence=4200,
+        pulse_expected_fluorescence=3200,
         sp_threshold=None,
         load_timeout=100,
         trigger_mode="ram",
@@ -231,16 +257,17 @@ def run_rabi_point_reuse(
     exp_runner: Experiment_Runner,
     probe_amplitude: float,
     n_runs: int,
+    pulse_shape: str = "square",
     check_spam: bool = False,
 ):
-    # Only change the probe function (DDS '729 Temp1' becomes edited=True)
+    # Only change the probe function (DDS '729 t1' becomes edited=True)
     if check_spam:
         exp_sequence.edit_section("Probe", {
-            "397b": make_probe_fn(amp=1, ton_us=float(t_us)),
-            "850 RP": make_probe_fn(amp=1, ton_us=float(t_us)),
+            "397b": make_probe_fn(amp=1, ton_us=float(t_us), shape=pulse_shape),
+            "850 RP": make_probe_fn(amp=1, ton_us=float(t_us), shape=pulse_shape),
         })
     else:
-        exp_sequence.edit_section("Probe", {"729 Temp1": make_probe_fn(amp=float(probe_amplitude), ton_us=float(t_us))})
+        exp_sequence.edit_section("Probe", {"729 t1": make_probe_fn(amp=float(probe_amplitude), ton_us=float(t_us), shape=pulse_shape)})
 
     # Rebuild RAM only for edited DDS and reflash only edited DDS
     exp_sequence.build_ram_arrays()
@@ -321,6 +348,7 @@ class RabiWorker(QtCore.QObject):
                     exp_runner=exp_runner,
                     probe_amplitude=p["probe_amplitude"],
                     n_runs=p["n_runs"],
+                    pulse_shape=str(p.get("pulse_shape", "square")),
                     check_spam=p.get("check_spam", False)
                 )
 
@@ -408,6 +436,12 @@ class RabiApp(QtWidgets.QMainWindow):
         self.op_mode.addItem("Pump to both S1/2 m = ±1/2", "both")
         self.op_mode.setCurrentIndex(0)
 
+        self.pulse_shape = QtWidgets.QComboBox()
+        self.pulse_shape.addItem("Square pulse", "square")
+        self.pulse_shape.addItem("Gaussian pulse", "gaussian")
+        self.pulse_shape.addItem("Adiabatic ramp", "adiabatic")
+        self.pulse_shape.setCurrentIndex(0)
+
         self.output_dir = QtWidgets.QLineEdit(os.getcwd())
         self.output_dir = QtWidgets.QLineEdit(os.path.join(os.getcwd(), "Rabi_Data"))
 
@@ -436,6 +470,7 @@ class RabiApp(QtWidgets.QMainWindow):
         form.addRow("N runs (per point)", self.n_runs)
         form.addRow("N cycles (builder)", self.n_cycles)      # NEW
         form.addRow("Optical pumping", self.op_mode)          # NEW
+        form.addRow("Probe pulse shape", self.pulse_shape)
         form.addRow("Output dir", self.output_dir)
         form.addRow("", self.start_btn)
         form.addRow("", self.stop_btn)
@@ -502,6 +537,7 @@ class RabiApp(QtWidgets.QMainWindow):
             n_runs=int(self.n_runs.value()),
             n_cycles=int(self.n_cycles.value()),
             op_mode=str(self.op_mode.currentData() or "m_minus"),
+            pulse_shape=str(self.pulse_shape.currentData() or "square"),
             output_dir=str(self.output_dir.text()).strip() or os.getcwd(),
             check_spam=bool(self.check_spam.isChecked())
         )
@@ -608,6 +644,7 @@ class RabiApp(QtWidgets.QMainWindow):
             "n_runs": params.get("n_runs"),
             "n_cycles": params.get("n_cycles"),         # NEW
             "op_mode": params.get("op_mode"),           # NEW
+            "pulse_shape": params.get("pulse_shape"),
         }
         save_rabi_csv(path, meta, self._t, self._p_dark, self._p_err, self._n_valid)
         self.status.setText(f"Saved: {path}")

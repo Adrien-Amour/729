@@ -37,14 +37,14 @@ DEFAULT_MEASUREMENT_JSON_PATH = os.path.join(MEAS_PRESET_START_DIR, "measurement
 # 397c is cooling detuning: must be consistent across dark/bright
 COOLING_DETUNING_397C = -14.0
 COOLING_DETUNING_397B = -14.0
-
+STATE_PREP_LENGTH_US = 100
 # Common trap/cycle settings
 TRAP_AMP_397C = 0.45
 N_CYCLES = 500  # was 1e3 (float); keep same value but as int for UI + builder
 
 # Shelving section defaults (edit here if needed)
-DARK_SHELVING = {"397c": 0.15, "850 RP": 1.0} # Pump to D5/2
-BRIGHT_SHELVING = {"866 RP": 0.2, "854 SP1": 0.1} #Pump to S1/2
+DARK_SHELVING = {"397b": 1.0, "850 RP": 1.0} # Pump to D5/2
+BRIGHT_SHELVING = {"866 RP": 0.2, "854 SP1": 0.3} #Pump to S1/2
 
 # State readout threshold used by Ion_State_Discrimination inside Experiment_Runner
 STATE_READOUT_THRESHOLD = 4
@@ -376,7 +376,7 @@ def build_sequence(
 
     exp.create_section(
         name=f"{name}:Shelving",
-        duration=60,
+        duration=STATE_PREP_LENGTH_US,
         dds_functions=shelving_dds_functions,
         pmt_gate_high=True,
     )
@@ -389,6 +389,7 @@ def build_sequence(
     )
 
     exp.build_ram_arrays()
+    # exp.plot_amplitude_arrays()
     exp.flash()
     return exp
 
@@ -403,8 +404,8 @@ def run_sequence(dds_dict, pulse_sequencer, *, seq_kwargs: dict, n_runs: int):
         pulse_sequencer,
         timeout=100,
         pmt_threshold=2000,
-        expected_fluorescence=8000,
-        pulse_expected_fluorescence=4000,
+        expected_fluorescence=3000,
+        pulse_expected_fluorescence=3000,
         sp_threshold=None,
         load_timeout=100,
         trigger_mode="ram",
@@ -485,8 +486,9 @@ class SpamWorker(QtCore.QObject):
                 n_cycles=self.config["n_cycles"],
                 threshold=self.config["threshold"],  # NEW
                 shelving_dds_functions={
-                    "397c": lambda t: float(DARK_SHELVING["397c"]),
-                    "850 RP": lambda t: float(DARK_SHELVING["850 RP"]),
+                    "397b": lambda t: float(DARK_SHELVING["397b"]) if t < 0.95 * STATE_PREP_LENGTH_US else 0.0,
+                    "850 RP": lambda t: float(DARK_SHELVING["850 RP"]) if t < 0.95 * STATE_PREP_LENGTH_US else 0.0,
+                    
                 },
                 name="Dark",
             )
@@ -503,8 +505,8 @@ class SpamWorker(QtCore.QObject):
                 n_cycles=self.config["n_cycles"],
                 threshold=self.config["threshold"],  # NEW
                 shelving_dds_functions={
-                    "866 RP": lambda t: float(BRIGHT_SHELVING["866 RP"]),
-                    "854 SP1": lambda t: float(BRIGHT_SHELVING["854 SP1"]),
+                    "866 RP": lambda t: float(BRIGHT_SHELVING["866 RP"]) if t < 0.95 * STATE_PREP_LENGTH_US else 0.0,
+                    "854 SP1": lambda t: float(BRIGHT_SHELVING["854 SP1"]) if t < 0.95 * STATE_PREP_LENGTH_US else 0.0,
                 },
                 name="Bright",
             )

@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 data_dir = r"c:\Users\probe\OneDrive - University of Sussex\Desktop\729\Ramsey_Data"
 pattern = re.compile(r"ramsey_tprecess_(\d+)us_(\d{8}_\d{6})\.csv")
 
+# Only analyze the most recent scan for these t_precess values (in microseconds).
+# Edit this list to control which times are included.
+TARGET_T_PRECESS_US = [10,20,40,60,90,120,150]
+
 # =============================
 # Ramsey fit functions
 # =============================
@@ -32,7 +36,14 @@ for fname in glob.glob(os.path.join(data_dir, "plus_ramsey_tprecess_*us_*.csv"))
         files_by_t.setdefault(t_precess, []).append((timestamp, fname))
 
 most_recent_files = []
+target_t_set = set(TARGET_T_PRECESS_US)
+missing_targets = sorted(target_t_set.difference(files_by_t.keys()))
+if missing_targets:
+    print(f"Warning: no files found for t_precess (us): {missing_targets}")
+
 for t, files in files_by_t.items():
+    if t not in target_t_set:
+        continue
     files.sort()
     most_recent_files.append((t, files[-1][1]))
 
@@ -76,8 +87,6 @@ plt.figure()
 for t, fname in most_recent_files:
     if t == 0:
         continue  # Skip t=0 files
-    # if t > 70:
-    #     continue  # Skip t=80us files for now (they look like outliers)
 
     phases, p_dark, stderr = [], [], []
 
@@ -210,6 +219,8 @@ Delta_S = zeemanFS(1/2, 1/2, 0, B) / (2*np.pi)
 Delta_D = zeemanFS(5/2, 1/2, 2, B) / (2 * np.pi)
 mS = -1/2
 mD = +3/2
+# mD=-5/2
+
 sensitivity = np.abs(-mS*Delta_S + mD*Delta_D)
 print(f"Sensitivity to magnetic field fluctuations: {sensitivity:.2f} (2pi) kHz/mG")
 
@@ -231,13 +242,13 @@ plt.plot(
 )
 plt.plot(
     t_fit,
-    np.exp(-t_fit / T2e),
+    popt[0]*np.exp(-t_fit / T2e),
     ':',
     label=r"Dephasing: $e^{-t/T_{2e}}$"
 )
 plt.plot(
     t_fit,
-    np.exp(-(t_fit / T2g)**2),
+    popt[0]*np.exp(-(t_fit / T2g)**2),
     ':',
     label=r"Gaussian $\Delta$ Noise: $e^{-(t/T_{2g})^2}$"
 )
