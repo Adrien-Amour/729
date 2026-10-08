@@ -2,6 +2,7 @@ import os  # moved up so env var is set before importing pyqtgraph
 # Force pyqtgraph to use PyQt5 (prevents PySide/PyQt mismatches)
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 
+import math
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtGui, QtWidgets
@@ -54,6 +55,65 @@ sensitivity = 2*Delta_m2/(2*np.pi)  # MHz/Gauss
 
 def gaussian(amplitude, mu, sigma): #Sigma is Half Width 1/e height (multiply by 2*sqrt(ln(2)) to get FWHM ~1.665)
     return lambda t: amplitude * np.exp(-((t - mu)**2) / (sigma**2))
+
+def adiabatic(amplitude: float, ton_us: float, edge_us: float = 1.0):
+    """
+    Raised-cosine envelope:
+    - ramp up over first edge_us
+    - flat top
+    - ramp down over last edge_us
+    If ton_us < 2*edge_us, ramps overlap symmetrically (no flat top).
+    """
+    A = float(amplitude)
+    T = float(max(0.0, ton_us))
+    e = float(max(0.0, edge_us))
+
+    if T <= 0.0:
+        return lambda t: 0.0
+    if e <= 0.0:
+        return lambda t: A if 0.0 <= float(t) <= T else 0.0
+
+    # If pulse is short, use symmetric half-duration ramps
+    if T < 2.0 * e:
+        e = T / 2.0
+
+    def fn(t):
+        x = float(t)
+        if x < 0.0 or x > T:
+            return 0.0
+
+        # Ramp up: 0 -> A
+        if x < e:
+            return A * 0.5 * (1.0 - np.cos(np.pi * x / e))
+
+        # Ramp down: A -> 0
+        if x > (T - e):
+            y = T - x
+            return A * 0.5 * (1.0 - np.cos(np.pi * y / e))
+
+        # Flat top
+        return A
+
+    return fn
+
+def make_probe_fn(*, amp: float, ton_us: float, shape: str = "square"):
+    ton_us = float(max(0.0, ton_us))
+    amp = float(amp)
+
+    if shape == "square":
+        return lambda t: amp if float(t) < ton_us else 0.0
+
+    if shape == "gaussian":
+        if ton_us <= 0.0:
+            return lambda t: 0.0
+        sigma = ton_us / (2.0 * math.sqrt(math.log(100.0)))
+        center = ton_us / 2.0
+        return lambda t: amp * np.exp(-((float(t) - center) ** 2) / (sigma ** 2))
+
+    if shape == "adiabatic":
+        return adiabatic(amp, ton_us, edge_us=4.0)
+
+    raise ValueError(f"Unknown pulse shape: {shape!r}")
 
 # sinc^2 model + fitter
 def sinc2(x, A, x0, w, y0):
@@ -154,7 +214,7 @@ def save_spectrum(detunings, values, errs=None, n_valid=None, directory=".", pre
     print(f"Saved: {out_csv}")
     return out_csv
 
-def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.2, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True):
+def init_experiment(probe_amplitude, probe_time_us: float, *, ram_step=0.2, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True, pulse_shape: str = "square"):
     """
     (Re)initialize hardware/sequence for a run so probe amplitude is a clean parameter.
 
@@ -170,8 +230,8 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.2, N_Cycl
     exp_sequence = Experiment_Builder(dds_dict, pulse_sequencer, ram_step=ram_step, N_Cycles=N_Cycles)
 
     exp_sequence.set_detunings(detuning_dict={
-        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -20, "866": 0, "866 OP": 30,
-        "850 RP": 0, "866 RP": 40, "729 Temp1": 0, "729 Temp2": 0
+        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -20, "866 OP": 30,
+        "850 RP": 0, "866 RP": 40, "729 t1": 0, "729 t2": 0
     })
 
     exp_sequence.load_cooling(length=2000)
@@ -199,9 +259,14 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.2, N_Cycl
     exp_sequence.create_section(name="wait before probe", duration=2, dds_functions={}, pmt_gate_high=False)
 
     # NOTE: freeze amplitude for this run (simple + predictable)
-    exp_sequence.create_section(name="Probe", duration=int(probe_time_us), dds_functions={
-        "729 Temp1": (lambda t, amp=float(probe_amplitude): amp),
-    }, pmt_gate_high=True)
+    exp_sequence.create_section(
+        name="Probe",
+        duration=int(max(1, math.ceil(float(probe_time_us)))),
+        dds_functions={
+            "729 t1": make_probe_fn(amp=float(probe_amplitude), ton_us=float(probe_time_us), shape=pulse_shape),
+        },
+        pmt_gate_high=True,
+    )
 
     exp_sequence.load_measurement()
     exp_sequence.build_ram_arrays()
@@ -213,7 +278,7 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.2, N_Cycl
         timeout=100,
         pmt_threshold=2000,
         expected_fluorescence=8000,
-        pulse_expected_fluorescence=5000,
+        pulse_expected_fluorescence=3300,
         sp_threshold=None,
         load_timeout=100,
         trigger_mode="ram",
@@ -224,7 +289,7 @@ def init_experiment(probe_amplitude, probe_time_us: int, *, ram_step=0.2, N_Cycl
     return exp_sequence, exp_runner
 
 def dark_probability(exp_sequence, exp_runner, detuning, *, trap_depth=0.55, n_runs=3, cancel_cb=None):
-    exp_sequence.edit_detunings(detuning_dict={"729 Temp1": detuning})
+    exp_sequence.edit_detunings(detuning_dict={"729 t1": detuning})
     exp_sequence.build_ram_arrays()
     exp_sequence.flash()
 
@@ -288,37 +353,43 @@ class ScanWorker(QtCore.QObject):
                 ram_step=p["ram_step"],
                 N_Cycles=p["n_cycles"],
                 op_mode=p["op_mode"],
+                pulse_shape=p["pulse_shape"],
             )
 
-            # NEW: background (729 off) before scanning
-            if self._should_stop():
-                self.status.emit("Stopped.")
-                self.finished.emit()
-                return
+            bg_y0 = None
+            if bool(p.get("measure_background", True)):
+                # Optional background (729 off) before scanning
+                if self._should_stop():
+                    self.status.emit("Stopped.")
+                    self.finished.emit()
+                    return
 
-            self.status.emit("Measuring background (729 off)...")
-            exp_sequence_bg, exp_runner_bg = init_experiment(
-                0.0,
-                p["probe_time_us"],
-                ram_step=p["ram_step"],
-                N_Cycles=p["n_cycles"],
-                op_mode=p["op_mode"],
-                measure_fluorescence=False,
-            )
-            bg_runs = max(1, int(p["n_runs"]) * 2)
-            bg_detuning = float(p["resonance"])
-            bg_y0, _bg_e, _bg_nv = dark_probability(
-                exp_sequence_bg, exp_runner_bg, bg_detuning,
-                trap_depth=p["trap_depth"],
-                n_runs=bg_runs,
-                cancel_cb=self._should_stop,
-            )
-            if bg_y0 is None:
-                self.status.emit("Stopped.")
-                self.finished.emit()
-                return
-            self.background_measured.emit(float(bg_y0), int(bg_runs))
-            self.status.emit(f"Background: P_dark={float(bg_y0):.6f} (N={bg_runs})")
+                self.status.emit("Measuring background (729 off)...")
+                exp_sequence_bg, exp_runner_bg = init_experiment(
+                    0.0,
+                    p["probe_time_us"],
+                    ram_step=p["ram_step"],
+                    N_Cycles=p["n_cycles"],
+                    op_mode=p["op_mode"],
+                    measure_fluorescence=False,
+                    pulse_shape=p["pulse_shape"],
+                )
+                bg_runs = max(1, int(p["n_runs"]) * 2)
+                bg_detuning = float(p["resonance"])
+                bg_y0, _bg_e, _bg_nv = dark_probability(
+                    exp_sequence_bg, exp_runner_bg, bg_detuning,
+                    trap_depth=p["trap_depth"],
+                    n_runs=bg_runs,
+                    cancel_cb=self._should_stop,
+                )
+                if bg_y0 is None:
+                    self.status.emit("Stopped.")
+                    self.finished.emit()
+                    return
+                self.background_measured.emit(float(bg_y0), int(bg_runs))
+                self.status.emit(f"Background: P_dark={float(bg_y0):.6f} (N={bg_runs})")
+            else:
+                self.status.emit("Background measurement: OFF")
 
             def do_scan(which, detunings, x0_guess):
                 vals, errs, nvs = [], [], []
@@ -352,7 +423,10 @@ class ScanWorker(QtCore.QObject):
                         prefix=f"{which}_spectrum",
                     )
 
-                popt, _ = fit_sinc2_fixed_y0(dets, vals, y0_fixed=bg_y0, x0_guess=x0_guess)
+                if bg_y0 is None:
+                    popt, _ = fit_sinc2(dets, vals, x0_guess=x0_guess)
+                else:
+                    popt, _ = fit_sinc2_fixed_y0(dets, vals, y0_fixed=bg_y0, x0_guess=x0_guess)
                 self.scan_done.emit(which, dets, vals, popt)
                 return dets, vals, popt
 
@@ -455,6 +529,17 @@ class LiveScanApp(QtWidgets.QMainWindow):
         self.op_mode.setCurrentIndex(0)
         self.op_mode.setToolTip("Select optical pumping sequence")
 
+        self.pulse_shape = QtWidgets.QComboBox()
+        self.pulse_shape.addItem("Square pulse", "square")
+        self.pulse_shape.addItem("Gaussian pulse", "gaussian")
+        self.pulse_shape.addItem("Adiabatic Ramp", "adiabatic")
+        self.pulse_shape.setCurrentIndex(0)
+        self.pulse_shape.setToolTip("Select probe pulse shape")
+
+        self.measure_background = QtWidgets.QCheckBox("Measure background (729 off)")
+        self.measure_background.setChecked(True)
+        self.measure_background.setToolTip("If enabled, measures P_dark once with 729 power=0 and uses it as fixed background in fitting")
+
         # NEW: experiment trap depth input
         self.trap_depth = QtWidgets.QDoubleSpinBox()
         self.trap_depth.setDecimals(3)
@@ -469,6 +554,8 @@ class LiveScanApp(QtWidgets.QMainWindow):
         form.addRow("Span [MHz]", self.span)
         form.addRow("Resolution/step [MHz]", self.step)
         form.addRow("Optical pumping", self.op_mode)  # NEW
+        form.addRow("Probe pulse shape", self.pulse_shape)
+        form.addRow("", self.measure_background)
         form.addRow("Probe amplitude [0..1]", self.probe_amp)
         form.addRow("Probe time [µs]", self.probe_time_us)   # NEW
         form.addRow("N runs (per detuning point)", self.n_runs)
@@ -574,12 +661,14 @@ class LiveScanApp(QtWidgets.QMainWindow):
             span=float(self.span.value()),
             step=float(self.step.value()),
             op_mode=str(self.op_mode.currentData() or "m_minus"),
+            pulse_shape=str(self.pulse_shape.currentData() or "square"),
             probe_amplitude=float(self.probe_amp.value()),
-            probe_time_us=int(self.probe_time_us.value()),
+            probe_time_us=float(self.probe_time_us.value()),
             n_runs=int(self.n_runs.value()),
             n_cycles=int(self.n_cycles.value()),
             output_dir=str(self.output_dir.text()).strip() or os.getcwd(),
             save_csv=bool(self.save_csv.isChecked()),
+            measure_background=bool(self.measure_background.isChecked()),
             # advanced defaults:
             ram_step=0.2,
             trap_depth=float(self.trap_depth.value()),  # CHANGED (was hardcoded 0.55)

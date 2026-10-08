@@ -147,7 +147,7 @@ class RamseyWorker(QtCore.QObject):
         def phase_fn(t, phase2=0.0, ton=pulse_time, tp=float(t_precess_us)):
             tt = float(t)
             # Apply phase only during 2nd pulse
-            return float(phase2) if (ton + tp) <= tt < (ton + tp + ton) else 0.0
+            return float(phase2) if (ton + tp/2) <= tt < (ton + tp + ton) else 0.0
 
         exp_sequence.create_section(
             name="RamseyBlock",

@@ -114,7 +114,7 @@ def fit_sinc2(x, y, x0_guess=None, y0_guess=None):
         x0_guess = x[np.argmax(y)]
     A0 = (np.max(y) - np.min(y)) or 1e-3
     w0 = max((x.max() - x.min()) / 10.0, 1e-3)
-    y00 = float(np.min(y)) if y0_guess is None else float(y0_guess)
+    y00 = float(y0_guess) if y0_guess is not None else (float(np.min(y)) if float(np.min(y)) < 0.1 else 0.1)
     try:
         popt, pcov = curve_fit(
             sinc2, x, y,
@@ -191,7 +191,7 @@ def save_spectrum(detunings, values, errs=None, n_valid=None, directory="."):
     print(f"Saved: {out_csv}")
     return out_csv
 
-def init_experiment(probe_amplitude, probe_time_us: float, *, ram_step=DEFAULT_RAM_STEP, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True, pulse_shape: str = "square"):
+def init_experiment(probe_amplitude, probe_time_us: float, *, probe_channel: str = "729 t1", ram_step=DEFAULT_RAM_STEP, N_Cycles=500, op_mode: str = "m_minus", measure_fluorescence: bool = True, pulse_shape: str = "square"):
     """
     (Re)initialize hardware/sequence for a run so probe amplitude is a clean parameter.
 
@@ -239,7 +239,7 @@ def init_experiment(probe_amplitude, probe_time_us: float, *, ram_step=DEFAULT_R
         name="Probe",
         duration=int(max(1, math.ceil(float(probe_time_us)))),
         dds_functions={
-            "729 t1": make_probe_fn(amp=float(probe_amplitude), ton_us=float(probe_time_us), shape=pulse_shape),
+            probe_channel: make_probe_fn(amp=float(probe_amplitude), ton_us=float(probe_time_us), shape=pulse_shape),
         },
         pmt_gate_high=True,
     )
@@ -264,9 +264,9 @@ def init_experiment(probe_amplitude, probe_time_us: float, *, ram_step=DEFAULT_R
         exp_runner.measure_expected_fluorescence()
     return exp_sequence, exp_runner
 
-def dark_probability(exp_sequence, exp_runner, detuning, *, trap_depth=0.55, n_runs=3, cancel_cb=None, use_spam_correction=True):
+def dark_probability(exp_sequence, exp_runner, detuning, *, probe_channel: str = "729 t1", trap_depth=0.55, n_runs=3, cancel_cb=None, use_spam_correction=True):
     # CHANGED: run in cancelable chunks (N=1) so Stop becomes responsive.
-    exp_sequence.edit_detunings(detuning_dict={"729 t1": detuning})
+    exp_sequence.edit_detunings(detuning_dict={probe_channel: detuning})
     exp_sequence.build_ram_arrays()
     exp_sequence.flash()
 
@@ -332,6 +332,7 @@ class ScanWorker(QtCore.QObject):
             exp_sequence, exp_runner = init_experiment(
                 p["probe_amplitude"],
                 p["probe_time_us"],
+                probe_channel=p["probe_channel"],
                 ram_step=p["ram_step"],
                 N_Cycles=p["n_cycles"],
                 op_mode=p["op_mode"],
@@ -351,6 +352,7 @@ class ScanWorker(QtCore.QObject):
                 exp_sequence_bg, exp_runner_bg = init_experiment(
                     0.0,
                     p["probe_time_us"],
+                    probe_channel=p["probe_channel"],
                     ram_step=p["ram_step"],
                     N_Cycles=p["n_cycles"],
                     op_mode=p["op_mode"],
@@ -361,6 +363,7 @@ class ScanWorker(QtCore.QObject):
                 bg_detuning = float(p["center"])
                 bg_y0, _bg_e, _bg_nv = dark_probability(
                     exp_sequence_bg, exp_runner_bg, bg_detuning,
+                    probe_channel=p["probe_channel"],
                     trap_depth=p["trap_depth"],
                     n_runs=bg_runs,
                     cancel_cb=self._should_stop,
@@ -385,6 +388,7 @@ class ScanWorker(QtCore.QObject):
 
                     y, e, nv = dark_probability(
                         exp_sequence, exp_runner, float(d),
+                        probe_channel=p["probe_channel"],
                         trap_depth=p["trap_depth"],
                         n_runs=p["n_runs"],
                         cancel_cb=self._should_stop,
@@ -464,6 +468,10 @@ class LiveScanApp(QtWidgets.QMainWindow):
         self.probe_amp.setSingleStep(0.01)
         self.probe_amp.setValue(1)
 
+        self.probe_channel = QtWidgets.QComboBox()
+        self.probe_channel.addItem("729 t1", "729 t1")
+        self.probe_channel.addItem("729 t2", "729 t2")
+
         # Probe time (µs) with resolution set by RAM step
         self.probe_time_us = QtWidgets.QDoubleSpinBox()
         self.probe_time_us.setRange(float(DEFAULT_RAM_STEP), 10_000_000.0)
@@ -522,6 +530,7 @@ class LiveScanApp(QtWidgets.QMainWindow):
         form.addRow("", self.load_res_btn)  #
         form.addRow("Span [MHz]", self.span)
         form.addRow("Resolution/step [MHz]", self.step)
+        form.addRow("Probe channel", self.probe_channel)
         form.addRow("Optical pumping", self.op_mode)  #
         form.addRow("Probe pulse shape", self.pulse_shape)  
         form.addRow("Probe amplitude [0..1]", self.probe_amp)
@@ -584,6 +593,7 @@ class LiveScanApp(QtWidgets.QMainWindow):
             center=float(self.center.value()),               # CHANGED
             span=float(self.span.value()),
             step=float(self.step.value()),
+            probe_channel=str(self.probe_channel.currentData() or "729 t1"),
             op_mode=str(self.op_mode.currentData() or "m_minus"), 
             pulse_shape=str(self.pulse_shape.currentData() or "square"),
             probe_amplitude=float(self.probe_amp.value()),

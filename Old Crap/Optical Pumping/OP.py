@@ -24,10 +24,10 @@ exp_sequence.load_cooling(length=100)
 
 # Create op section 
 exp_sequence.create_section(name="Wait", duration=10, dds_functions={})
-exp_sequence.create_section(name="Pump To Stretch", duration=100, dds_functions={
-    "397b": lambda t: 0.4,
-    "866 OP": lambda t: 0.2,
-    "854 SP1": lambda t: 0.2,
+exp_sequence.create_section(name="Pump To Stretch", duration=30, dds_functions={
+    "397b": lambda t: 0.5,
+    "866 OP": lambda t: 0.12,
+    "854 SP1": lambda t: 1,
 }, pmt_gate_high=True) #First stage of Optical Pumping
 
 exp_sequence.create_section(name="Pump To Ground", duration=5, dds_functions={
@@ -51,13 +51,13 @@ exp_runner = Experiment_Runner(
     trigger_mode="ram",
     cavity_lock=False,
 )
-exp_runner.start_experiment(N=80)
+exp_runner.start_experiment(N=2000)
 
 # Replace the first histogram with a fitted exponential + offset
 first_lower, first_upper, bins = 0, 50, 200
 diffs_dict = exp_runner.get_time_diffs(mode="signal-f", lower_cutoff=first_lower, upper_cutoff=first_upper)
 all_diffs = np.concatenate(list(diffs_dict.values())) if diffs_dict else np.array([])
-
+np.savetxt("pmt_timestamps.csv", all_diffs, delimiter=",", header="timestamp_us", comments="")
 if all_diffs.size > 0:
     # Histogram of counts (not density)
     counts, edges = np.histogram(all_diffs, bins=bins, range=(first_lower, first_upper))

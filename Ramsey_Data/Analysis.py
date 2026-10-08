@@ -11,7 +11,7 @@ pattern = re.compile(r"ramsey_tprecess_(\d+)us_(\d{8}_\d{6})\.csv")
 
 # Only analyze the most recent scan for these t_precess values (in microseconds).
 # Edit this list to control which times are included.
-TARGET_T_PRECESS_US = [10,20,40,60,90,120,150]
+TARGET_T_PRECESS_US = [10,40,80,120,160]
 
 # =============================
 # Ramsey fit functions
@@ -200,9 +200,9 @@ print(f"T2_exp  = {T2e:.2f} ± {T2e_err:.2f} us")
 print(f"T2_gaus = {T2g:.2f} ± {T2g_err:.2f} us")
 linewidth = 2 / (T2e * 1E-6) # in Hz
 print(f"Estimated linewidth from T2_exp: {linewidth*1E-3/(2*np.pi):.2f} (2pi) kHz")
-sigma = np.sqrt(2)/ (T2g * 1E-6) # in Hz
-
-print(f"Estimated sigma of Gaussian frequency distribution: {sigma*1E-3/(2*np.pi):.2f} (2pi) kHz")
+sigma_delta = np.sqrt(2)/ (T2g * 1E-6) # in Hz
+sigma_f = sigma_delta / (2*np.pi) # in Hz
+print(f"Estimated sigma of Gaussian frequency distribution: {sigma_f*1E-3:.2f} (2pi) kHz")
 
 def zeemanFS(J, S, L, B):
     muB = 9.274078e-24   # Bohr magneton in J/T
@@ -222,10 +222,10 @@ mD = +3/2
 # mD=-5/2
 
 sensitivity = np.abs(-mS*Delta_S + mD*Delta_D)
-print(f"Sensitivity to magnetic field fluctuations: {sensitivity:.2f} (2pi) kHz/mG")
+print(f"Frequency sensitivity to magnetic field fluctuations: {sensitivity:.2f} kHz/mG")
+sigma_B =sigma_f*1E-3/sensitivity #convert to kHz and divide by sensitivity in kHz/mG to get mG
 
-print(f"Estimated sigma of magnetic field fluctuations: {sigma*1E-3/sensitivity:.2f} mG")
-
+print(f"Estimated sigma of magnetic field fluctuations: {sigma_B:.2f} mG") 
 # =============================
 # Plot decay
 # =============================
@@ -303,4 +303,29 @@ plt.ylabel(r"Contrast $C/C_0$")
 plt.title("Ramsey Contrast Decay")
 plt.legend()
 plt.tight_layout()
+plt.show()
+
+sensitivity_p = np.abs(-1/2*Delta_S + 3/2*Delta_D)
+sensitivity_m = np.abs(-1/2*Delta_S - 5/2*Delta_D)
+superposition_sensitivity = sensitivity_p + sensitivity_m
+print(f"Superposition sensitivity: {superposition_sensitivity:.2f} (2pi) MHz/G or kHz/mG")
+sigma_f_superposition_kHz = superposition_sensitivity * sigma_B
+print(f"Estimated sigma of superposition frequency fluctuations: {sigma_f_superposition_kHz:.2f} (2pi) kHz")
+sigma_delta_superposition_khz = sigma_f_superposition_kHz * 2 * np.pi
+T2_superposition_us = np.sqrt(2) / (sigma_delta_superposition_khz * 1E-3)  # convert kHz to MHz
+print(f"Estimated T2 for superposition: {T2_superposition_us:.2f} us")
+interpolated_superposition_decay = model(t_fit, 1, np.inf, T2_superposition_us) 
+fidelity = 0.5 * (1 + interpolated_superposition_decay)
+plt.plot(
+    t_fit,
+    interpolated_superposition_decay,
+    ':',
+    label=r"Superposition Decay: $e^{-(t/T_{2g})^2}$"
+)
+plt.plot(
+    t_fit,
+    fidelity,
+    ':',
+    label=r"Superposition Fidelity: $0.5(1 + e^{-(t/T_{2g})^2})$"
+)
 plt.show()

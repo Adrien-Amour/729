@@ -37,14 +37,14 @@ DEFAULT_MEASUREMENT_JSON_PATH = os.path.join(MEAS_PRESET_START_DIR, "measurement
 # 397c is cooling detuning: must be consistent across dark/bright
 COOLING_DETUNING_397C = -14.0
 COOLING_DETUNING_397B = -14.0
-STATE_PREP_LENGTH_US = 100
+STATE_PREP_LENGTH_US = 140
 # Common trap/cycle settings
 TRAP_AMP_397C = 0.45
 N_CYCLES = 500  # was 1e3 (float); keep same value but as int for UI + builder
 
 # Shelving section defaults (edit here if needed)
 DARK_SHELVING = {"397b": 1.0, "850 RP": 1.0} # Pump to D5/2
-BRIGHT_SHELVING = {"866 RP": 0.2, "854 SP1": 0.3} #Pump to S1/2
+BRIGHT_SHELVING = {"866 RP": 0.2, "854 SP1": 1.0} #Pump to S1/2
 
 # State readout threshold used by Ion_State_Discrimination inside Experiment_Runner
 STATE_READOUT_THRESHOLD = 4
@@ -495,7 +495,8 @@ class SpamWorker(QtCore.QObject):
             dark_hist, dark_tdiffs, dark_stats = run_sequence(
                 dds_dict, pulse_sequencer, seq_kwargs=dark_seq, n_runs=self.config["n_runs"]
             )
-
+            dds_dict = load_dds_dict("ram", DDS_CONFIG_PATH) # reload dds_dict to reset any changes made by the dark sequence
+            
             bright_seq = dict(
                 detuning_866rp=self.config["detuning_866rp"],
                 meas_length=self.config["meas_length"],
@@ -791,7 +792,7 @@ class SpamApp(QtWidgets.QMainWindow):
 
     def _measurement_window_bounds_us(self) -> tuple[float, float]:
         # Trigger is at end of cooling; measurement starts after 60 µs shelving.
-        t0 = 60.0
+        t0 = STATE_PREP_LENGTH_US
         t1 = t0 + float(self.meas_length.value())
         return t0, t1
 

@@ -109,11 +109,11 @@ def prepare_op_cal_context(*, params: dict, dds_dict=None, pulse_sequencer=None)
 
     exp_sequence.create_section(
         name="Pump To Stretch",
-        duration=int(max(0, round(pump_stretch_len))),
+        duration=int(max(2, round(pump_stretch_len))),
         dds_functions={
-            "397b": lambda t, a=float(params["amp_397b"]): a,  # CHANGED: use 397b during optical pumping
-            "866 OP": lambda t, a=float(params["amp_866op"]): a,
-            "854 SP1": lambda t, a=float(params["amp_854sp1"]): a,
+            "397b": lambda t, a=float(params["amp_397b"]): a if float(t) <= pump_stretch_len else 0.0,  # CHANGED: use 397b during optical pumping
+            "866 OP": lambda t, a=float(params["amp_866op"]): a if float(t) <= pump_stretch_len else 0.0,
+            "854 SP1": lambda t, a=float(params["amp_854sp1"]): a if float(t) <= pump_stretch_len else 0.0,
         },
         pmt_gate_high=True,
     )
@@ -122,8 +122,8 @@ def prepare_op_cal_context(*, params: dict, dds_dict=None, pulse_sequencer=None)
         name="Pump To Ground",
         duration=int(max(0, round(pump_ground_len))),
         dds_functions={
-            "850 RP": lambda t, a=float(params["amp_850rp"]): a if float(t) >= 1.0 else 0.0,
-            "854 SP1": lambda t, a=float(params["amp_854sp1"]): a if float(t) >= 1.0 else 0.0,
+            "850 RP": lambda t, a=float(params["amp_850rp"]): a if float(t) >= 0.2 else 0.0,
+            "854 SP1": lambda t, a=float(params["amp_854sp1"]): a if float(t) >= 0.2 else 0.0,
         },
         pmt_gate_high=True,
     )

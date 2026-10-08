@@ -183,11 +183,20 @@ def prepare_rabi_context(*, params: dict):
         external_trigger=bool(params["external_trigger"]),
     )
 
-    exp_sequence.set_detunings(detuning_dict={
-        "854 SP1": 0, "854 SP2": 0, "397b": 0, "397c": -18, "866 OP": 0,
-        "850 RP": 0, "866 RP": 40, "729 t1": float(params["detuning_mhz"]), "729 t2": 0
-    })
+    probe_channel = str(params["probe_channel"])
+    other_channel = "729 t2" if probe_channel == "729 t1" else "729 t1"
 
+    exp_sequence.set_detunings(detuning_dict={
+        "854 SP1": 0,
+        "854 SP2": 0,
+        "397b": 0,
+        "397c": -18,
+        "866 OP": 0,
+        "850 RP": 0,
+        "866 RP": 40,
+        probe_channel: float(params["detuning_mhz"]),
+        other_channel: 0,
+    })
     exp_sequence.load_cooling(length=2000)
     exp_sequence.load_trapping()
 
@@ -209,7 +218,6 @@ def prepare_rabi_context(*, params: dict):
     # FIXED-LENGTH probe section (duration = max scan time, but >=4 us)
     # Use ceil so decimal t_end_us is fully covered.
     probe_section_dur = int(max(4, math.ceil(float(params["t_end_us"]))))
-    probe_section_dur = int(max(4, math.ceil(float(params["t_end_us"]))))
     if params.get("check_spam", True):
         exp_sequence.create_section(
             name="Probe",
@@ -220,11 +228,18 @@ def prepare_rabi_context(*, params: dict):
             },
             pmt_gate_high=True,
         )
+
     else:
         exp_sequence.create_section(
             name="Probe",
             duration=probe_section_dur,
-            dds_functions={"729 t1": make_probe_fn(amp=float(params["probe_amplitude"]), ton_us=0.0, shape=pulse_shape)},
+            dds_functions={
+                probe_channel: make_probe_fn(
+                    amp=float(params["probe_amplitude"]),
+                    ton_us=0.0,
+                    shape=pulse_shape,
+                )
+            },
             pmt_gate_high=True,
         )
 
@@ -256,6 +271,7 @@ def run_rabi_point_reuse(
     exp_sequence: Experiment_Builder,
     exp_runner: Experiment_Runner,
     probe_amplitude: float,
+    probe_channel: str,
     n_runs: int,
     pulse_shape: str = "square",
     check_spam: bool = False,
@@ -266,8 +282,18 @@ def run_rabi_point_reuse(
             "397b": make_probe_fn(amp=1, ton_us=float(t_us), shape=pulse_shape),
             "850 RP": make_probe_fn(amp=1, ton_us=float(t_us), shape=pulse_shape),
         })
+
     else:
-        exp_sequence.edit_section("Probe", {"729 t1": make_probe_fn(amp=float(probe_amplitude), ton_us=float(t_us), shape=pulse_shape)})
+        exp_sequence.edit_section(
+            "Probe",
+            {
+                probe_channel: make_probe_fn(
+                    amp=float(probe_amplitude),
+                    ton_us=float(t_us),
+                    shape=pulse_shape,
+                )
+            },
+        )
 
     # Rebuild RAM only for edited DDS and reflash only edited DDS
     exp_sequence.build_ram_arrays()
@@ -347,6 +373,7 @@ class RabiWorker(QtCore.QObject):
                     exp_sequence=exp_sequence,
                     exp_runner=exp_runner,
                     probe_amplitude=p["probe_amplitude"],
+                    probe_channel=p["probe_channel"],
                     n_runs=p["n_runs"],
                     pulse_shape=str(p.get("pulse_shape", "square")),
                     check_spam=p.get("check_spam", False)
@@ -391,6 +418,11 @@ class RabiApp(QtWidgets.QMainWindow):
         self.load_res_btn = QtWidgets.QPushButton("Load resonance…")
         self.load_res_btn.setToolTip("Select a resonance log CSV and load its most recent 'Resonant Detuning' value")
 
+        self.probe_channel = QtWidgets.QComboBox()
+        self.probe_channel.addItem("729 t1", "729 t1")
+        self.probe_channel.addItem("729 t2", "729 t2")
+
+        form.addRow("Probe channel", self.probe_channel)
 
         self.power = QtWidgets.QDoubleSpinBox()
         self.power.setDecimals(4)
@@ -539,7 +571,8 @@ class RabiApp(QtWidgets.QMainWindow):
             op_mode=str(self.op_mode.currentData() or "m_minus"),
             pulse_shape=str(self.pulse_shape.currentData() or "square"),
             output_dir=str(self.output_dir.text()).strip() or os.getcwd(),
-            check_spam=bool(self.check_spam.isChecked())
+            check_spam=bool(self.check_spam.isChecked()),
+            probe_channel=str(self.probe_channel.currentData() or "729 t1"),
         )
 
     @Slot()

@@ -171,7 +171,7 @@ def build_ramsey_sequence(
     )
 
     exp_sequence.set_detunings(detuning_dict={
-        "729 Temp1": float(detuning_mhz)
+        "729 t1": float(detuning_mhz)
     })
 
     exp_sequence.load_cooling(length=int(COOLING_US))
@@ -212,8 +212,8 @@ def build_ramsey_sequence(
     exp_sequence.create_section(
         name="RamseyBlock",
         duration=duration_us,
-        dds_functions={"729 Temp1": dds_fn},
-        phase_functions={"729 Temp1": phase_fn},
+        dds_functions={"729 t1": dds_fn},
+        phase_functions={"729 t1": phase_fn},
         pmt_gate_high=True,
     )
 
@@ -225,7 +225,7 @@ def build_ramsey_sequence(
 
 
 def dark_probability(exp_sequence, exp_runner, *, detuning_mhz: float, trap_depth: float, n_runs: int, use_spam_correction: bool):
-    exp_sequence.edit_detunings(detuning_dict={"729 Temp1": float(detuning_mhz)})
+    exp_sequence.edit_detunings(detuning_dict={"729 t1": float(detuning_mhz)})
     exp_sequence.build_ram_arrays()
     exp_sequence.flash()
 
